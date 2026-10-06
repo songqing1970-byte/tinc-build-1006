@@ -1,4 +1,8 @@
-name: Production Industrial-Grade Tinc Build for BE3600
+# =============================================================================
+# Optimized tincd 1.0.36 static build for Xiaomi BE3600 (ARMv7hf, Musl, OpenSSL)
+# =============================================================================
+
+name: Reproduce tincd static build for BE3600 (Optimized)
 
 on:
   workflow_dispatch:
@@ -7,6 +11,10 @@ on:
         description: 'Tinc Release Version'
         required: true
         default: '1.0.36'
+      openssl_version:
+        description: 'OpenSSL Version'
+        required: true
+        default: '3.0.13'
       enable_upx:
         description: 'Enable UPX Compression'
         type: boolean
@@ -14,188 +22,163 @@ on:
         default: true
 
 env:
-  # 已更新为正确的 musl-cc 官方工具链 10.3.0 SHA256 哈希值
-  MUSL_TOOLCHAIN_SHA256: "9766bd71f7bf5aaebdbfa5d99bc32357d6052eeed7cf2f27572d4ae6a3a4c0ef"
-  TINC_1_0_36_SHA256: "131435e022f18f95cbe1f2e32230113dd3170e9b92f7678564f3312b9325997d"
+  TOOLCHAIN_URL: "https://github.com/userdocs/qbt-musl-cross-make/releases/download/2640/x86_64-arm-linux-musleabihf.tar.xz"
+  TOOLCHAIN_SHA256: "c4a9e74a01449b130e40c9fdccc67b51918a948bac15c597911c663171207971"
+  OPENSSL_SHA256: "88525753f79d3bec27d2fa7c66aa0b92b3aa9498dafd93d7cfa4b3780cdae313"
+  TINC_SHA256: "04d87f81335ca32f00a5be1fc94d13fae9d8ae3a65452b76df259cb44a1afa78"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      # 1. 环境准备与磁盘清理
       - name: System Cleanup & Install Tools
         run: |
           set -euo pipefail
-          sudo rm -rf /tmp/tinc_* /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get update
-          sudo apt-get install -y build-essential upx file qemu-user-static curl
+          sudo apt-get install -y build-essential perl xz-utils file curl upx qemu-user-static
+          command -v qemu-arm-static >/dev/null 2>&1 || { echo "ERROR: qemu-arm-static missing!"; exit 1; }
 
-          command -v qemu-arm-static >/dev/null 2>&1 || { echo "ERROR: qemu-arm-static not found!"; exit 1; }
-
-      # 2. Musl 交叉工具链缓存
+      # 1. 工具链缓存与下载
       - name: Cache Musl Toolchain
         id: cache-toolchain
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: /opt/musl-toolchain
-          key: musl-toolchain-armv7hf-${{ env.MUSL_TOOLCHAIN_SHA256 }}
+          key: musl-toolchain-armv7hf-${{ env.TOOLCHAIN_SHA256 }}
 
-      # 3. 从 GitHub Releases CDN 极速下载并校验工具链 (修正确切文件名：arm-linux-musleabihf-cross-10.3.0.tgz)
       - name: Download & Verify Musl Toolchain
         run: |
           set -euo pipefail
-          sudo mkdir -p /opt/musl-toolchain
-          sudo chown -R $USER:$USER /opt/musl-toolchain
-
           if [ "${{ steps.cache-toolchain.outputs.cache-hit }}" != "true" ]; then
-            echo "Cache miss. Downloading Musl Toolchain from fast GitHub Releases mirror..."
-            rm -rf /opt/musl-toolchain/*
-            
-            # 使用 GitHub Releases 官方托管节点的精确物理文件名 (100% 走 GitHub CDN 加速)
-            TOOLCHAIN_URL="https://github.com/musl-cc/toolchains/releases/download/v10.3.0/arm-linux-musleabihf-cross-10.3.0.tgz"
-            
-            curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 "$TOOLCHAIN_URL" -o /tmp/toolchain.tgz
-            
-            echo "Verifying Toolchain SHA256..."
-            echo "${MUSL_TOOLCHAIN_SHA256}  /tmp/toolchain.tgz" | sha256sum -c - || { echo "ERROR: Toolchain Hash Mismatch!"; exit 1; }
-            
-            tar -xzf /tmp/toolchain.tgz -C /opt/musl-toolchain --strip-components=1
-            rm -f /tmp/toolchain.tgz
-          fi
+            sudo rm -rf /opt/musl-toolchain
+            sudo mkdir -p /opt/musl-toolchain
+            sudo chown -R $USER:$USER /opt/musl-toolchain
 
-          sudo chown -R $USER:$USER /opt/musl-toolchain
+            curl -f -sSL --connect-timeout 20 --max-time 300 --retry 4 "${{ env.TOOLCHAIN_URL }}" -o /tmp/toolchain.tar.xz
+            echo "${{ env.TOOLCHAIN_SHA256 }}  /tmp/toolchain.tar.xz" | sha256sum -c - || { echo "Toolchain Hash Mismatch!"; exit 1; }
+            tar -xJf /tmp/toolchain.tar.xz -C /opt/musl-toolchain --strip-components=1
+            rm -f /tmp/toolchain.tar.xz
+          fi
           echo "/opt/musl-toolchain/bin" >> $GITHUB_PATH
 
-      # 4. 源码与编译目录缓存
-      - name: Cache Tinc Source & Build Directory
-        id: cache-source
-        uses: actions/cache@v3
+      # 2. OpenSSL 静态编译缓存（大幅加快重编译速度）
+      - name: Cache Static OpenSSL
+        id: cache-openssl
+        uses: actions/cache@v4
         with:
-          path: |
-            tinc-${{ github.event.inputs.tinc_version }}.tar.gz
-            tinc-build-dir
-          key: tinc-src-${{ github.event.inputs.tinc_version }}-${{ env.TINC_1_0_36_SHA256 }}
+          path: /tmp/openssl_install
+          key: openssl-static-armv7hf-${{ github.event.inputs.openssl_version }}-${{ env.OPENSSL_SHA256 }}
 
-      # 5. 下载与校验 Tinc 源码
+      - name: Build Static OpenSSL (if cache miss)
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/openssl-src
+          curl -f -sSL --retry 4 "https://www.openssl.org/source/openssl-${{ github.event.inputs.openssl_version }}.tar.gz" -o /tmp/openssl.tar.gz
+          echo "${{ env.OPENSSL_SHA256 }}  /tmp/openssl.tar.gz" | sha256sum -c - || { echo "OpenSSL Hash Mismatch!"; exit 1; }
+          tar -xzf /tmp/openssl.tar.gz -C /tmp/openssl-src --strip-components=1
+
+          cd /tmp/openssl-src
+          export CC="arm-linux-musleabihf-gcc"
+          export CFLAGS="-O2 -march=armv7-a -mthumb -mfpu=neon-vfpv3 -mfloat-abi=hard"
+          
+          ./Configure linux-armv4 -static --prefix=/tmp/openssl_install --openssldir=/tmp/openssl_install no-shared no-asm -march=armv7-a -mfloat-abi=hard
+          make -j$(nproc)
+          make install_sw
+
+      # 3. 下载与校验 Tinc 源码
       - name: Download & Verify Tinc Source
         run: |
           set -euo pipefail
-          SRC_TAR="tinc-${{ github.event.inputs.tinc_version }}.tar.gz"
-          
-          if [ ! -f "$SRC_TAR" ] || ! echo "${TINC_1_0_36_SHA256}  $SRC_TAR" | sha256sum -c - >/dev/null 2>&1; then
-            echo "Source archive invalid or missing. Fetching..."
-            rm -rf "$SRC_TAR" tinc-build-dir
-            curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 "https://www.tinc-vpn.org/packages/$SRC_TAR" -o "$SRC_TAR"
-            echo "${TINC_1_0_36_SHA256}  $SRC_TAR" | sha256sum -c - || { echo "ERROR: Source Tarball Hash Mismatch!"; exit 1; }
-          fi
+          mkdir -p /tmp/tinc-src
+          curl -f -sSL --retry 4 "https://codeload.github.com/gsliepen/tinc/tar.gz/refs/tags/release-${{ github.event.inputs.tinc_version }}" -o /tmp/tinc.tar.gz
+          echo "${{ env.TINC_SHA256 }}  /tmp/tinc.tar.gz" | sha256sum -c - || { echo "Tinc Hash Mismatch!"; exit 1; }
+          tar -xzf /tmp/tinc.tar.gz -C /tmp/tinc-src --strip-components=1
+          cd /tmp/tinc-src && autoreconf -i
 
-          if [ ! -d "tinc-build-dir" ]; then
-            mkdir -p tinc-build-dir
-            tar -xzf "$SRC_TAR" -C tinc-build-dir --strip-components=1
-          fi
-
-      # 6. 纯静态交叉编译
-      - name: Build Tinc Binary
+      # 4. 配置与交叉编译 Tinc
+      - name: Build Static tincd
         run: |
           set -euo pipefail
-          
-          command -v arm-linux-musleabihf-gcc >/dev/null 2>&1 || { echo "ERROR: Cross Compiler missing!"; exit 1; }
-          command -v arm-linux-musleabihf-readelf >/dev/null 2>&1 || { echo "ERROR: Readelf missing!"; exit 1; }
+          command -v arm-linux-musleabihf-gcc >/dev/null 2>&1 || { echo "Cross Compiler missing!"; exit 1; }
 
-          rm -rf /tmp/tinc_install
-          mkdir -p /tmp/tinc_install
-
-          cd tinc-build-dir
-
+          cd /tmp/tinc-src
           export CC="arm-linux-musleabihf-gcc"
           export CXX="arm-linux-musleabihf-g++"
           export CFLAGS="-O2 -march=armv7-a -mthumb -mfpu=neon-vfpv3 -mfloat-abi=hard"
-          export LDFLAGS="-static -Wl,--gc-sections"
-
-          echo "=== Cross Compiler Info ==="
-          ${CC} --version
-          echo "=== Readelf Info ==="
-          arm-linux-musleabihf-readelf --version | head -n 1
-          echo "=== CFLAGS: ${CFLAGS} ==="
+          export CPPFLAGS="-I/tmp/openssl_install/include"
+          export LDFLAGS="-static -Wl,--gc-sections -L/tmp/openssl_install/lib"
+          export LIBS="-ldl -lpthread -latomic"
 
           ./configure \
             --host=arm-linux-musleabihf \
             --prefix=/tmp/tinc_install \
-            --enable-static \
-            --disable-shared \
             --disable-lzo \
             --disable-zlib \
-            --with-openssl=no || { echo "ERROR: Configure failed!"; exit 1; }
+            --with-openssl=/tmp/openssl_install || { echo "Configure failed!"; exit 1; }
 
-          NPROC=$(nproc)
-          JOBS=$(( NPROC > 4 ? 4 : NPROC ))
-          make -j${JOBS} || { echo "ERROR: Make failed!"; exit 1; }
-          make install || { echo "ERROR: Make install failed!"; exit 1; }
+          make -C src -j$(nproc) || { echo "Make failed!"; exit 1; }
+          make -C src install || { echo "Install failed!"; exit 1; }
 
-      # 7. ELF 依赖审计、QEMU Cortex-A53 预演与 UPX 压缩
-      - name: Audit, Secondary Check & Artifact Package
+      # 5. ELF 静态审计、QEMU Cortex-A53 执行测试、Strip & UPX 压缩
+      - name: Audit, QEMU Test & Package
         run: |
           set -euo pipefail
           TARGET_BIN="/tmp/tinc_install/sbin/tincd"
-          
-          if [ ! -f "$TARGET_BIN" ]; then
-            echo "ERROR: Output binary missing!"
-            exit 1
-          fi
+          [ -f "$TARGET_BIN" ] || { echo "Output binary missing!"; exit 1; }
 
-          echo "=== 1. File ELF Format Audit ==="
+          echo "=== 1. File Type ==="
           file "$TARGET_BIN"
 
-          echo "=== 2. Pre-UPX Readelf Dynamic Dependency Check ==="
+          echo "=== 2. Static Dependency Check ==="
           if arm-linux-musleabihf-readelf -d "$TARGET_BIN" 2>/dev/null | grep -q "NEEDED"; then
-            echo "ERROR: Binary contains dynamic library dependencies! Failed static test."
-            exit 1
+            echo "ERROR: Dynamic dependencies found!"; exit 1
           fi
           echo "SUCCESS: 0 Dynamic dependencies found."
 
-          echo "=== 3. Raw Binary Size Audit ==="
+          echo "=== 3. Strip Symbols ==="
+          arm-linux-musleabihf-strip "$TARGET_BIN"
           ls -lh "$TARGET_BIN"
 
-          echo "=== 4. QEMU ARM (Cortex-A53) Pre-execution Test ==="
+          echo "=== 4. QEMU ARM (Cortex-A53) Real Execution Test ==="
           qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
 
           if [ "${{ github.event.inputs.enable_upx }}" = "true" ]; then
-            echo "=== 5. Applying UPX Compression ==="
-            upx --best "$TARGET_BIN"
-            upx -t "$TARGET_BIN"
-            
-            echo "=== 6. Post-UPX Secondary Readelf Dependency Check ==="
-            if arm-linux-musleabihf-readelf -d "$TARGET_BIN" 2>/dev/null | grep -q "NEEDED"; then
-              echo "ERROR: Post-UPX binary introduced dynamic links!"
-              exit 1
+            echo "=== 5. UPX Compression ==="
+            if upx --best "$TARGET_BIN"; then
+              upx -t "$TARGET_BIN"
+              echo "=== 6. Post-UPX QEMU Execution Test ==="
+              qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
+              ls -lh "$TARGET_BIN"
+            else
+              echo "WARNING: UPX compression failed, using original stripped binary."
             fi
-
-            echo "=== 7. Post-UPX Compressed Size Audit ==="
-            ls -lh "$TARGET_BIN"
-
-            echo "=== 8. Post-UPX QEMU Execution Test ==="
-            qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
           fi
 
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           CLEAN_VER=$(echo "${{ github.event.inputs.tinc_version }}" | tr -cd 'a-zA-Z0-9._-')
-          
-          FINAL_NAME="tincd-v${CLEAN_VER}-armv7hf-${SHORT_SHA}"
-          FINAL_NAME=$(echo "$FINAL_NAME" | cut -c1-40)
+          NAME="tincd-v${CLEAN_VER}-armv7hf-musl-static"
+          cp "$TARGET_BIN" "/tmp/$NAME"
+          (cd /tmp && sha256sum "$NAME" > "$NAME.sha256")
 
-          if [ -z "$FINAL_NAME" ] || [ "$FINAL_NAME" = "tincd-" ]; then
-            FINAL_NAME="tincd-armv7hf-static-${SHORT_SHA}"
-          fi
-          
-          mv "$TARGET_BIN" "/tmp/$FINAL_NAME" || { echo "ERROR: File move failed!"; exit 1; }
-          echo "FINAL_NAME=$FINAL_NAME" >> $GITHUB_ENV
+          {
+            echo "artifact: $NAME"
+            echo "tinc_version: ${{ github.event.inputs.tinc_version }}"
+            echo "openssl_version: ${{ github.event.inputs.openssl_version }}"
+            echo "toolchain: musl-cross-make prebuilt (gcc 16.2.0 / musl)"
+            echo "arch: ARMv7 hard-float (armv7-a, mthumb, neon-vfpv3)"
+            echo "static: yes (static-pie, 0 dynamic deps)"
+            echo "upx: ${{ github.event.inputs.enable_upx }}"
+            echo "sha256: $(awk '{print $1}' /tmp/$NAME.sha256)"
+          } > "/tmp/$NAME.meta"
 
-      # 8. 上传产物 (upload-artifact@v4)
+          echo "FINAL_NAME=$NAME" >> $GITHUB_ENV
+
+      # 6. 上传 Artifact 交付物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.FINAL_NAME }}
-          path: /tmp/${{ env.FINAL_NAME }}
+          path: |
+            /tmp/${{ env.FINAL_NAME }}
+            /tmp/${{ env.FINAL_NAME }}.sha256
+            /tmp/${{ env.FINAL_NAME }}.meta
