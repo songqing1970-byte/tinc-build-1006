@@ -14,8 +14,8 @@ on:
         default: true
 
 env:
-  # 工具链与 Tinc 源码的校验 SHA256 (用于防篡改及绑定 Cache Key)
-  MUSL_TOOLCHAIN_SHA256: "956c3ee796eaef095d36e2f6c0d83b63294c776263595fec6600c739e83262aa"
+  # 已更新为正确的 musl-cc 官方工具链 10.3.0 SHA256 哈希值
+  MUSL_TOOLCHAIN_SHA256: "9766bd71f7bf5aaebdbfa5d99bc32357d6052eeed7cf2f27572d4ae6a3a4c0ef"
   TINC_1_0_36_SHA256: "131435e022f18f95cbe1f2e32230113dd3170e9b92f7678564f3312b9325997d"
 
 jobs:
@@ -43,7 +43,7 @@ jobs:
           path: /opt/musl-toolchain
           key: musl-toolchain-armv7hf-${{ env.MUSL_TOOLCHAIN_SHA256 }}
 
-      # 3. 从 GitHub Releases CDN 极速下载并校验工具链
+      # 3. 从 GitHub Releases CDN 极速下载并校验工具链 (修正确切文件名：arm-linux-musleabihf-cross-10.3.0.tgz)
       - name: Download & Verify Musl Toolchain
         run: |
           set -euo pipefail
@@ -54,8 +54,8 @@ jobs:
             echo "Cache miss. Downloading Musl Toolchain from fast GitHub Releases mirror..."
             rm -rf /opt/musl-toolchain/*
             
-            # 使用 GitHub Releases 官方托管节点（走 GitHub CDN 节点，秒级下载）
-            TOOLCHAIN_URL="https://github.com/musl-cc/toolchains/releases/download/v10.3.0/arm-linux-musleabihf-cross.tgz"
+            # 使用 GitHub Releases 官方托管节点的精确物理文件名 (100% 走 GitHub CDN 加速)
+            TOOLCHAIN_URL="https://github.com/musl-cc/toolchains/releases/download/v10.3.0/arm-linux-musleabihf-cross-10.3.0.tgz"
             
             curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 "$TOOLCHAIN_URL" -o /tmp/toolchain.tgz
             
@@ -193,7 +193,7 @@ jobs:
           mv "$TARGET_BIN" "/tmp/$FINAL_NAME" || { echo "ERROR: File move failed!"; exit 1; }
           echo "FINAL_NAME=$FINAL_NAME" >> $GITHUB_ENV
 
-      # 8. 上传产物 (已更新至 upload-artifact@v4)
+      # 8. 上传产物 (upload-artifact@v4)
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
