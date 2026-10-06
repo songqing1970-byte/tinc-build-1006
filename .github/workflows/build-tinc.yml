@@ -61,7 +61,7 @@ jobs:
           fi
           echo "/opt/musl-toolchain/bin" >> $GITHUB_PATH
 
-      # 2. OpenSSL 静态编译缓存（大幅加快重编译速度）
+      # 2. OpenSSL 静态编译缓存
       - name: Cache Static OpenSSL
         id: cache-openssl
         uses: actions/cache@v4
@@ -120,7 +120,7 @@ jobs:
           make -C src -j$(nproc) || { echo "Make failed!"; exit 1; }
           make -C src install || { echo "Install failed!"; exit 1; }
 
-      # 5. ELF 静态审计、QEMU Cortex-A53 执行测试、Strip & UPX 压缩
+      # 5. ELF 静态审计、QEMU Cortex-A15 执行测试、Strip & UPX 压缩
       - name: Audit, QEMU Test & Package
         run: |
           set -euo pipefail
@@ -140,15 +140,16 @@ jobs:
           arm-linux-musleabihf-strip "$TARGET_BIN"
           ls -lh "$TARGET_BIN"
 
-          echo "=== 4. QEMU ARM (Cortex-A53) Real Execution Test ==="
-          qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
+          # 已修正为 32 位标准的 ARMv7 CPU 型号 cortex-a15
+          echo "=== 4. QEMU ARM (Cortex-A15) Real Execution Test ==="
+          qemu-arm-static -cpu cortex-a15 "$TARGET_BIN" --version
 
           if [ "${{ github.event.inputs.enable_upx }}" = "true" ]; then
             echo "=== 5. UPX Compression ==="
             if upx --best "$TARGET_BIN"; then
               upx -t "$TARGET_BIN"
               echo "=== 6. Post-UPX QEMU Execution Test ==="
-              qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
+              qemu-arm-static -cpu cortex-a15 "$TARGET_BIN" --version
               ls -lh "$TARGET_BIN"
             else
               echo "WARNING: UPX compression failed, using original stripped binary."
