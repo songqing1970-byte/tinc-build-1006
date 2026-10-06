@@ -14,7 +14,6 @@ on:
         default: true
 
 env:
-  # 工具链与源码的官方预设 SHA256 哈希值（保证下载防篡改 & 动态 Cache Key 绑定）
   MUSL_TOOLCHAIN_SHA256: "956c3ee796eaef095d36e2f6c0d83b63294c776263595fec6600c739e83262aa"
   TINC_1_0_36_SHA256: "131435e022f18f95cbe1f2e32230113dd3170e9b92f7678564f3312b9325997d"
 
@@ -25,19 +24,15 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 解决 5, 11, 13, 15：清理磁盘残留、全局安装与 QEMU/Tool 命令前置校验
       - name: System Cleanup & Install Tools
         run: |
           set -euo pipefail
-          # 解决 11：清理临时文件与空间
           sudo rm -rf /tmp/tinc_* /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get update
           sudo apt-get install -y build-essential upx file qemu-user-static curl
 
-          # 解决 15：前置断言 QEMU 模拟器存在
           command -v qemu-arm-static >/dev/null 2>&1 || { echo "ERROR: qemu-arm-static not found!"; exit 1; }
 
-      # 解决 1：将工具包真正的 SHA256 绑定到 Cache Key 中，上游更新时缓存自动失效
       - name: Cache Musl Toolchain
         id: cache-toolchain
         uses: actions/cache@v3
@@ -45,7 +40,7 @@ jobs:
           path: /opt/musl-toolchain
           key: musl-toolchain-armv7hf-${{ env.MUSL_TOOLCHAIN_SHA256 }}
 
-      # 解决 2, 14, 16, 17：HTTP --fail 响应、SHA256 哈希比对、权限强制修正
+      # 方案一：强抗网络抖动 + 备用节点容灾
       - name: Download & Verify Musl Toolchain
         run: |
           set -euo pipefail
@@ -55,12 +50,15 @@ jobs:
           if [ "${{ steps.cache-toolchain.outputs.cache-hit }}" != "true" ]; then
             echo "Cache miss. Downloading Musl Toolchain..."
             rm -rf /opt/musl-toolchain/*
-            TOOLCHAIN_URL="https://more.musl.cc/10.3.0/x86_64-linux-musl/arm-linux-musleabihf-cross.tgz"
             
-            # 解决 14：增加 --fail 捕获 HTTP 错误
-            curl -f -sSL --connect-timeout 15 --retry 3 "$TOOLCHAIN_URL" -o /tmp/toolchain.tgz
+            PRIMARY_URL="https://more.musl.cc/10.3.0/x86_64-linux-musl/arm-linux-musleabihf-cross.tgz"
             
-            # 解决 2：执行真正严密的 SHA256 哈希校验
+            # 使用强容错参数：允许 HTTP 错误重试、设置 30s 握手超时、自动重试 5 次
+            if ! curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 --retry-all-errors "$PRIMARY_URL" -o /tmp/toolchain.tgz; then
+              echo "Primary source failed or timed out. Retrying with fallback node..."
+              curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 --retry-all-errors "https://musl.cc/arm-linux-musleabihf-cross.tgz" -o /tmp/toolchain.tgz
+            fi
+            
             echo "Verifying Toolchain SHA256..."
             echo "${MUSL_TOOLCHAIN_SHA256}  /tmp/toolchain.tgz" | sha256sum -c - || { echo "ERROR: Toolchain Hash Mismatch!"; exit 1; }
             
@@ -68,11 +66,9 @@ jobs:
             rm -f /tmp/toolchain.tgz
           fi
 
-          # 解决 17：无论缓存是否命中，统一修复权限与环境变量
           sudo chown -R $USER:$USER /opt/musl-toolchain
           echo "/opt/musl-toolchain/bin" >> $GITHUB_PATH
 
-      # 解决 3, 4：源码 SHA256 哈希校验与解压目录缓存（避免重复解压）
       - name: Cache Tinc Source & Build Directory
         id: cache-source
         uses: actions/cache@v3
@@ -87,11 +83,10 @@ jobs:
           set -euo pipefail
           SRC_TAR="tinc-${{ github.event.inputs.tinc_version }}.tar.gz"
           
-          # 解决 3：对源码包做真正的 SHA256 比对，校验失败则重新拉取
           if [ ! -f "$SRC_TAR" ] || ! echo "${TINC_1_0_36_SHA256}  $SRC_TAR" | sha256sum -c - >/dev/null 2>&1; then
             echo "Source archive invalid or missing. Fetching..."
             rm -rf "$SRC_TAR" tinc-build-dir
-            curl -f -sSL --connect-timeout 15 --retry 3 "https://www.tinc-vpn.org/packages/$SRC_TAR" -o "$SRC_TAR"
+            curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 --retry-all-errors "https://www.tinc-vpn.org/packages/$SRC_TAR" -o "$SRC_TAR"
             echo "${TINC_1_0_36_SHA256}  $SRC_TAR" | sha256sum -c - || { echo "ERROR: Source Tarball Hash Mismatch!"; exit 1; }
           fi
 
@@ -100,16 +95,13 @@ jobs:
             tar -xzf "$SRC_TAR" -C tinc-build-dir --strip-components=1
           fi
 
-      # 解决 5, 6, 7, 8, 11, 12：严格返回码捕获、工具链命令断言、日志输出、挂载残留清理
       - name: Build Tinc Binary
         run: |
           set -euo pipefail
           
-          # 解决 8：前置断言交叉编译器与 Readelf 命令存在
           command -v arm-linux-musleabihf-gcc >/dev/null 2>&1 || { echo "ERROR: Cross Compiler missing!"; exit 1; }
           command -v arm-linux-musleabihf-readelf >/dev/null 2>&1 || { echo "ERROR: Readelf missing!"; exit 1; }
 
-          # 解决 11：清理历史安装残留
           rm -rf /tmp/tinc_install
           mkdir -p /tmp/tinc_install
 
@@ -120,14 +112,12 @@ jobs:
           export CFLAGS="-O2 -march=armv7-a -mthumb -mfpu=neon-vfpv3 -mfloat-abi=hard"
           export LDFLAGS="-static -Wl,--gc-sections"
 
-          # 解决 12：输出编译器与 Readelf 版本日志备查
           echo "=== Cross Compiler Info ==="
           ${CC} --version
           echo "=== Readelf Info ==="
           arm-linux-musleabihf-readelf --version | head -n 1
           echo "=== CFLAGS: ${CFLAGS} ==="
 
-          # 解决 6：捕获 configure 异常
           ./configure \
             --host=arm-linux-musleabihf \
             --prefix=/tmp/tinc_install \
@@ -137,13 +127,11 @@ jobs:
             --disable-zlib \
             --with-openssl=no || { echo "ERROR: Configure failed!"; exit 1; }
 
-          # 解决 7：捕获 make 与 make install 异常
           NPROC=$(nproc)
           JOBS=$(( NPROC > 4 ? 4 : NPROC ))
           make -j${JOBS} || { echo "ERROR: Make failed!"; exit 1; }
           make install || { echo "ERROR: Make install failed!"; exit 1; }
 
-      # 解决 9, 10, 13, 16, 18：二次依赖校验、QEMU内核兼容测试、体积审计、非法与空名称兜底
       - name: Audit, Secondary Check & Artifact Package
         run: |
           set -euo pipefail
@@ -164,7 +152,6 @@ jobs:
           fi
           echo "SUCCESS: 0 Dynamic dependencies found."
 
-          # 解决 18：打印 UPX 压缩前文件原始体积
           echo "=== 3. Raw Binary Size Audit ==="
           ls -lh "$TARGET_BIN"
 
@@ -176,14 +163,12 @@ jobs:
             upx --best "$TARGET_BIN"
             upx -t "$TARGET_BIN"
             
-            # 解决 10：对 UPX 压缩后的 ELF 再次做 Readelf 依赖断言，防壳层污染
             echo "=== 6. Post-UPX Secondary Readelf Dependency Check ==="
             if arm-linux-musleabihf-readelf -d "$TARGET_BIN" 2>/dev/null | grep -q "NEEDED"; then
               echo "ERROR: Post-UPX binary introduced dynamic links!"
               exit 1
             fi
 
-            # 解决 18：打印 UPX 压缩后文件体积对比
             echo "=== 7. Post-UPX Compressed Size Audit ==="
             ls -lh "$TARGET_BIN"
 
@@ -191,14 +176,12 @@ jobs:
             qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
           fi
 
-          # 解决 13, 16：安全清洗名称，增加空字符兜底判断，捕获 mv 返回码
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           CLEAN_VER=$(echo "${{ github.event.inputs.tinc_version }}" | tr -cd 'a-zA-Z0-9._-')
           
           FINAL_NAME="tincd-v${CLEAN_VER}-armv7hf-${SHORT_SHA}"
           FINAL_NAME=$(echo "$FINAL_NAME" | cut -c1-40)
 
-          # 空文件名与非法字符断言兜底
           if [ -z "$FINAL_NAME" ] || [ "$FINAL_NAME" = "tincd-" ]; then
             FINAL_NAME="tincd-armv7hf-static-${SHORT_SHA}"
           fi
@@ -206,7 +189,7 @@ jobs:
           mv "$TARGET_BIN" "/tmp/$FINAL_NAME" || { echo "ERROR: File move failed!"; exit 1; }
           echo "FINAL_NAME=$FINAL_NAME" >> $GITHUB_ENV
 
-      # 上传 100% 审计合规的最终二进制
+      # 已更新为正确的 upload-artifact@v4
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
