@@ -14,6 +14,7 @@ on:
         default: true
 
 env:
+  # 工具链与 Tinc 源码的校验 SHA256 (用于防篡改及绑定 Cache Key)
   MUSL_TOOLCHAIN_SHA256: "956c3ee796eaef095d36e2f6c0d83b63294c776263595fec6600c739e83262aa"
   TINC_1_0_36_SHA256: "131435e022f18f95cbe1f2e32230113dd3170e9b92f7678564f3312b9325997d"
 
@@ -24,6 +25,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 1. 环境准备与磁盘清理
       - name: System Cleanup & Install Tools
         run: |
           set -euo pipefail
@@ -33,6 +35,7 @@ jobs:
 
           command -v qemu-arm-static >/dev/null 2>&1 || { echo "ERROR: qemu-arm-static not found!"; exit 1; }
 
+      # 2. Musl 交叉工具链缓存
       - name: Cache Musl Toolchain
         id: cache-toolchain
         uses: actions/cache@v3
@@ -40,7 +43,7 @@ jobs:
           path: /opt/musl-toolchain
           key: musl-toolchain-armv7hf-${{ env.MUSL_TOOLCHAIN_SHA256 }}
 
-      # 方案一：强抗网络抖动 + 备用节点容灾
+      # 3. 从 GitHub Releases CDN 极速下载并校验工具链
       - name: Download & Verify Musl Toolchain
         run: |
           set -euo pipefail
@@ -48,16 +51,13 @@ jobs:
           sudo chown -R $USER:$USER /opt/musl-toolchain
 
           if [ "${{ steps.cache-toolchain.outputs.cache-hit }}" != "true" ]; then
-            echo "Cache miss. Downloading Musl Toolchain..."
+            echo "Cache miss. Downloading Musl Toolchain from fast GitHub Releases mirror..."
             rm -rf /opt/musl-toolchain/*
             
-            PRIMARY_URL="https://more.musl.cc/10.3.0/x86_64-linux-musl/arm-linux-musleabihf-cross.tgz"
+            # 使用 GitHub Releases 官方托管节点（走 GitHub CDN 节点，秒级下载）
+            TOOLCHAIN_URL="https://github.com/musl-cc/toolchains/releases/download/v10.3.0/arm-linux-musleabihf-cross.tgz"
             
-            # 使用强容错参数：允许 HTTP 错误重试、设置 30s 握手超时、自动重试 5 次
-            if ! curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 --retry-all-errors "$PRIMARY_URL" -o /tmp/toolchain.tgz; then
-              echo "Primary source failed or timed out. Retrying with fallback node..."
-              curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 --retry-all-errors "https://musl.cc/arm-linux-musleabihf-cross.tgz" -o /tmp/toolchain.tgz
-            fi
+            curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 "$TOOLCHAIN_URL" -o /tmp/toolchain.tgz
             
             echo "Verifying Toolchain SHA256..."
             echo "${MUSL_TOOLCHAIN_SHA256}  /tmp/toolchain.tgz" | sha256sum -c - || { echo "ERROR: Toolchain Hash Mismatch!"; exit 1; }
@@ -69,6 +69,7 @@ jobs:
           sudo chown -R $USER:$USER /opt/musl-toolchain
           echo "/opt/musl-toolchain/bin" >> $GITHUB_PATH
 
+      # 4. 源码与编译目录缓存
       - name: Cache Tinc Source & Build Directory
         id: cache-source
         uses: actions/cache@v3
@@ -78,6 +79,7 @@ jobs:
             tinc-build-dir
           key: tinc-src-${{ github.event.inputs.tinc_version }}-${{ env.TINC_1_0_36_SHA256 }}
 
+      # 5. 下载与校验 Tinc 源码
       - name: Download & Verify Tinc Source
         run: |
           set -euo pipefail
@@ -86,7 +88,7 @@ jobs:
           if [ ! -f "$SRC_TAR" ] || ! echo "${TINC_1_0_36_SHA256}  $SRC_TAR" | sha256sum -c - >/dev/null 2>&1; then
             echo "Source archive invalid or missing. Fetching..."
             rm -rf "$SRC_TAR" tinc-build-dir
-            curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 --retry-all-errors "https://www.tinc-vpn.org/packages/$SRC_TAR" -o "$SRC_TAR"
+            curl -f -sSL --connect-timeout 30 --max-time 300 --retry 5 "https://www.tinc-vpn.org/packages/$SRC_TAR" -o "$SRC_TAR"
             echo "${TINC_1_0_36_SHA256}  $SRC_TAR" | sha256sum -c - || { echo "ERROR: Source Tarball Hash Mismatch!"; exit 1; }
           fi
 
@@ -95,6 +97,7 @@ jobs:
             tar -xzf "$SRC_TAR" -C tinc-build-dir --strip-components=1
           fi
 
+      # 6. 纯静态交叉编译
       - name: Build Tinc Binary
         run: |
           set -euo pipefail
@@ -132,6 +135,7 @@ jobs:
           make -j${JOBS} || { echo "ERROR: Make failed!"; exit 1; }
           make install || { echo "ERROR: Make install failed!"; exit 1; }
 
+      # 7. ELF 依赖审计、QEMU Cortex-A53 预演与 UPX 压缩
       - name: Audit, Secondary Check & Artifact Package
         run: |
           set -euo pipefail
@@ -189,7 +193,7 @@ jobs:
           mv "$TARGET_BIN" "/tmp/$FINAL_NAME" || { echo "ERROR: File move failed!"; exit 1; }
           echo "FINAL_NAME=$FINAL_NAME" >> $GITHUB_ENV
 
-      # 已更新为正确的 upload-artifact@v4
+      # 8. 上传产物 (已更新至 upload-artifact@v4)
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
