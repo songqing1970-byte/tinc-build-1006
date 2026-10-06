@@ -6,10 +6,10 @@ on:
         description: Enable UPX compression
         type: boolean
         required: true
-        default: true
+        default: false
 
 env:
-  MUSL_TOOLCHAIN_URL: "https://more.musl.cc/10.3.0/x86_64-linux-musl/arm-linux-musleabihf-cross.tgz"
+  MUSL_TOOLCHAIN_URL: "https://github.com/richfelker/musl-cross-make/releases/download/v10.3.0/arm-linux-musleabihf-cross.tgz"
   MUSL_TOOLCHAIN_SHA256: "956c3ee796eaef095d36e2f6c0d83b63294c776263595fec6600c739e83262aa"
   TINC_VERSION: "1.0.36"
   TINC_SHA256: "131435e022f18f95cbe1f2e32230113dd3170e9b92f7678564f3312b9325997d"
@@ -43,7 +43,7 @@ jobs:
           sudo chown $USER:$USER /opt/musl-toolchain
           if [[ "${{ steps.cache-toolchain.outputs.cache-hit }}" != "true" ]]; then
             rm -rf /opt/musl-toolchain/*
-            curl -f --connect-timeout 15 --retry 3 "${{ env.MUSL_TOOLCHAIN_URL }}" -o /tmp/toolchain.tgz
+            curl -f --connect-timeout 30 --retry 3 "${{ env.MUSL_TOOLCHAIN_URL }}" -o /tmp/toolchain.tgz
             echo "${{ env.MUSL_TOOLCHAIN_SHA256 }}  /tmp/toolchain.tgz" | sha256sum -c -
             tar -xzf /tmp/toolchain.tgz -C /opt/musl-toolchain --strip-components=1
             rm -f /tmp/toolchain.tgz
@@ -57,7 +57,7 @@ jobs:
           SRC_TAR="tinc-${{ env.TINC_VERSION }}.tar.gz"
           if [[ ! -f "$SRC_TAR" ]] || ! echo "${{ env.TINC_SHA256 }}  $SRC_TAR" | sha256sum -c - >/dev/null 2>&1; then
             rm -rf "$SRC_TAR" tinc-build
-            curl -f --connect-timeout 15 --retry 3 "https://www.tinc-vpn.org/packages/$SRC_TAR" -o "$SRC_TAR"
+            curl -f --connect-timeout 30 --retry 3 "https://www.tinc-vpn.org/packages/$SRC_TAR" -o "$SRC_TAR"
             echo "${{ env.TINC_SHA256 }}  $SRC_TAR" | sha256sum -c -
           fi
           rm -rf tinc-build
@@ -108,7 +108,7 @@ jobs:
             exit 1
           fi
 
-          echo "=== QEMU test (armv7 generic, no cortex-a53 fake cpu) ==="
+          echo "=== QEMU test (armv7 generic) ==="
           qemu-arm-static "$TARGET" --version
 
           echo "=== pre-upx size ==="
