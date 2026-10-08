@@ -3,7 +3,7 @@
 # Fix: remove no-asm, redundant LIBS, adjust qemu cpu, add --enable-static
 # =============================================================================
 
-name: Reproduce tincd static build for BE3600 (Optimized)
+name: Reproduce tincd static build for BE3600 (Optimized) v2
 
 on:
   workflow_dispatch:
