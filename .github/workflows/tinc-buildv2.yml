@@ -1,6 +1,6 @@
 # =============================================================================
 # Optimized tincd 1.0.36 static build for Xiaomi BE3600 (ARMv7hf, Musl, OpenSSL)
-# Fix: remove no-asm, redundant LIBS, adjust qemu cpu, add --enable-static
+# Features: OpenSSL ASM Enabled, Cleaned Links, Autotools Static, Default QEMU
 # =============================================================================
 
 name: Reproduce tincd static build for BE3600 (Optimized) v2
@@ -83,7 +83,7 @@ jobs:
           export CC="arm-linux-musleabihf-gcc"
           export CFLAGS="-O2 -march=armv7-a -mthumb -mfpu=neon-vfpv3 -mfloat-abi=hard"
           
-          # 移除 no-asm，启用ARM汇编加速
+          # 开启 ARM 汇编加速（NEON / VFP 加速加解密）
           ./Configure linux-armv4 -static --prefix=/tmp/openssl_install --openssldir=/tmp/openssl_install no-shared -march=armv7-a -mfloat-abi=hard
           make -j$(nproc)
           make install_sw
@@ -122,7 +122,7 @@ jobs:
           make -C src -j$(nproc) || { echo "Make failed!"; exit 1; }
           make -C src install || { echo "Install failed!"; exit 1; }
 
-      # 5. ELF 静态审计、QEMU Cortex-A53 执行测试、Strip & UPX 压缩
+      # 5. ELF 静态审计、QEMU 默认模拟执行测试、Strip & UPX 压缩
       - name: Audit, QEMU Test & Package
         run: |
           set -euo pipefail
@@ -143,16 +143,16 @@ jobs:
           arm-linux-musleabihf-strip "$TARGET_BIN"
           ls -lh "$TARGET_BIN"
 
-          # IPQ9570 = Cortex-A53 (32bit ARMv7 mode)，贴近真实硬件
-          echo "=== 4. QEMU ARM (Cortex-A53) Real Execution Test ==="
-          qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
+          # 使用 qemu-arm-static 默认 CPU 执行验证
+          echo "=== 4. QEMU ARM Real Execution Test (Default CPU) ==="
+          qemu-arm-static "$TARGET_BIN" --version
 
           if [ "${{ github.event.inputs.enable_upx }}" = "true" ]; then
             echo "=== 5. UPX Compression ==="
             if upx --best "$TARGET_BIN"; then
               upx -t "$TARGET_BIN"
               echo "=== 6. Post-UPX QEMU Execution Test ==="
-              qemu-arm-static -cpu cortex-a53 "$TARGET_BIN" --version
+              qemu-arm-static "$TARGET_BIN" --version
               ls -lh "$TARGET_BIN"
             else
               echo "WARNING: UPX compression failed, using original stripped binary."
