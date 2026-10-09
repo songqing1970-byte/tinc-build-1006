@@ -1,9 +1,9 @@
 # =============================================================================
 # Ultra-Optimized tincd 1.0.36 static build for Xiaomi BE3600 (ARMv7hf, Musl, OpenSSL)
-# Features: Cortex-A53 Tuning, OpenSSL Slimming, LTO Optimization, Full Static
+# Features: Cortex-A53 Tuning, Slim OpenSSL, GC-Sections, LZMA UPX, Stable Static
 # =============================================================================
 
-name: Reproduce tincd static build for BE3600 (Ultra-Optimized) v2.1
+name: Reproduce tincd static build for BE3600 (Ultra-Optimized v2.1)
 
 on:
   workflow_dispatch:
@@ -68,7 +68,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/openssl_install
-          key: openssl-static-armv7hf-slim-${{ github.event.inputs.openssl_version }}-${{ env.OPENSSL_SHA256 }}
+          key: openssl-static-armv7hf-slim-v3-${{ github.event.inputs.openssl_version }}-${{ env.OPENSSL_SHA256 }}
 
       - name: Build Static OpenSSL (Slimmed)
         if: steps.cache-openssl.outputs.cache-hit != 'true'
@@ -81,10 +81,8 @@ jobs:
 
           cd /tmp/openssl-src
           export CC="arm-linux-musleabihf-gcc"
-          # 优化 Flag：包含 Cortex-A53 针对性微架构优化与段裁剪
           export CFLAGS="-O2 -march=armv7-a -mcpu=cortex-a53 -mtune=cortex-a53 -mfpu=neon-vfpv3 -mfloat-abi=hard -ffunction-sections -fdata-sections"
 
-          # 禁用不必要的 OpenSSL 算法模块以大幅精简体积
           ./Configure linux-armv4 -static \
             --prefix=/tmp/openssl_install \
             --openssldir=/tmp/openssl_install \
@@ -110,8 +108,8 @@ jobs:
           tar -xzf /tmp/tinc.tar.gz -C /tmp/tinc-src --strip-components=1
           cd /tmp/tinc-src && autoreconf -i
 
-      # 4. 配置与交叉编译 Tinc (开启 LTO 优化)
-      - name: Build Static tincd (LTO & GC Sections)
+      # 4. 配置与交叉编译 Tinc
+      - name: Build Static tincd
         run: |
           set -euo pipefail
           command -v arm-linux-musleabihf-gcc >/dev/null 2>&1 || { echo "Cross Compiler missing!"; exit 1; }
@@ -120,15 +118,13 @@ jobs:
           export CC="arm-linux-musleabihf-gcc"
           export CXX="arm-linux-musleabihf-g++"
           
-          # 开启 LTO 链接时优化及死代码剔除
-          export CFLAGS="-O2 -march=armv7-a -mcpu=cortex-a53 -mtune=cortex-a53 -mfpu=neon-vfpv3 -mfloat-abi=hard -ffunction-sections -fdata-sections -flto"
+          export CFLAGS="-O2 -march=armv7-a -mcpu=cortex-a53 -mtune=cortex-a53 -mfpu=neon-vfpv3 -mfloat-abi=hard -ffunction-sections -fdata-sections"
           export CPPFLAGS="-I/tmp/openssl_install/include"
-          export LDFLAGS="-static -Wl,--gc-sections -flto -L/tmp/openssl_install/lib"
+          export LDFLAGS="-static -Wl,--gc-sections -L/tmp/openssl_install/lib"
 
           ./configure \
             --host=arm-linux-musleabihf \
             --prefix=/tmp/tinc_install \
-            --enable-static \
             --disable-lzo \
             --disable-zlib \
             --with-openssl=/tmp/openssl_install || { echo "Configure failed!"; exit 1; }
@@ -184,7 +180,7 @@ jobs:
             echo "toolchain: musl-cross-make prebuilt (gcc 16.2.0 / musl)"
             echo "arch: ARMv7 hard-float (Cortex-A53, neon-vfpv3)"
             echo "static: yes (static-pie, 0 dynamic deps)"
-            echo "optimizations: LTO, GC-Sections, Slim OpenSSL"
+            echo "optimizations: GC-Sections, Slim OpenSSL"
             echo "upx: ${{ github.event.inputs.enable_upx }}"
             echo "sha256: $(awk '{print $1}' /tmp/$NAME.sha256)"
           } > "/tmp/$NAME.meta"
