@@ -1,5 +1,5 @@
 # =============================================================================
-# tincd 1.0.36 static build for Xiaomi Router 4A Gigabit (Mipsel, MT7621A)
+# tincd 1.0.36 static build for Xiaomi Router 4A Gigabit (Mipsel, MT7621A) - Fixed v3
 # =============================================================================
 
 name: Reproduce tincd static build for Xiaomi 4A Gigabit (MT7621A)
@@ -87,7 +87,6 @@ jobs:
           export CC="mipsel-linux-musl-gcc"
           export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections"
 
-          # 目标用 linux-mips32（linux-mipsel 在 OpenSSL 3.0.13 中不存在）
           ./Configure linux-mips32 -static \
             --prefix=/tmp/openssl_install \
             --openssldir=/tmp/openssl_install \
@@ -125,7 +124,7 @@ jobs:
             cd /tmp/tinc-src && autoreconf -i
           fi
 
-      # 4. 配置与交叉编译 Tinc
+      # 4. 配置与交叉编译 Tinc (修复编译器连通性测试)
       - name: Build Static tincd
         run: |
           set -euo pipefail
@@ -137,8 +136,7 @@ jobs:
 
           export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables"
           export CPPFLAGS="-I/tmp/openssl_install/include"
-          export LDFLAGS="-static -Wl,--gc-sections -Wl,-O1 -L/tmp/openssl_install/lib"
-          export LIBS="-ldl -lpthread -latomic"
+          export LDFLAGS="-Wl,--gc-sections -Wl,-O1 -L/tmp/openssl_install/lib"
 
           if [ "${{ github.event.inputs.enable_lto }}" = "true" ]; then
             export CFLAGS="$CFLAGS -flto"
@@ -152,7 +150,7 @@ jobs:
             --disable-zlib \
             --with-openssl=/tmp/openssl_install || { echo "Configure failed!"; exit 1; }
 
-          make -C src -j$(nproc) || { echo "Make failed!"; exit 1; }
+          make -C src -j$(nproc) LDFLAGS="$LDFLAGS -static" || { echo "Make failed!"; exit 1; }
           make -C src install || { echo "Install failed!"; exit 1; }
 
       # 5. ELF 静态审计、QEMU 测试、Strip & UPX 压缩
