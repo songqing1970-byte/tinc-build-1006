@@ -1,5 +1,5 @@
 # =============================================================================
-# Optimized tincd 1.0.36 static build for Xiaomi Router 4A Gigabit (Mipsel, MT7621A)
+# tincd 1.0.36 static build for Xiaomi Router 4A Gigabit (Mipsel, MT7621A)
 # =============================================================================
 
 name: Reproduce tincd static build for Xiaomi 4A Gigabit (MT7621A)
@@ -20,11 +20,15 @@ on:
         type: boolean
         required: true
         default: true
+      enable_lto:
+        description: 'Enable LTO (-flto, experimental, default off)'
+        type: boolean
+        required: true
+        default: false
 
 env:
-  # 针对 MT7621A (Mipsel) 的 musl 交叉编译工具链
-  TOOLCHAIN_URL: "https://github.com/userdocs/qbt-musl-cross-make/releases/download/2640/mipsel-linux-musl.tar.xz"
-  TOOLCHAIN_SHA256: "94aa5a9cf8e11029c623910c262c5bda2ae60b64d142078604d538e1b697b0d9"
+  TOOLCHAIN_URL: "https://github.com/userdocs/qbt-musl-cross-make/releases/download/2640/x86_64-mipsel-linux-musl.tar.xz"
+  TOOLCHAIN_SHA256: "612ca4fb4cacec035f75b7b965ba34272a45f49d755c0b874fbb9bc9b60522eb"
   OPENSSL_SHA256: "88525753f79d3bec27d2fa7c66aa0b92b3aa9498dafd93d7cfa4b3780cdae313"
   TINC_SHA256: "04d87f81335ca32f00a5be1fc94d13fae9d8ae3a65452b76df259cb44a1afa78"
 
@@ -83,7 +87,8 @@ jobs:
           export CC="mipsel-linux-musl-gcc"
           export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections"
 
-          ./Configure linux-mipsel -static \
+          # 目标用 linux-mips32（linux-mipsel 在 OpenSSL 3.0.13 中不存在）
+          ./Configure linux-mips32 -static \
             --prefix=/tmp/openssl_install \
             --openssldir=/tmp/openssl_install \
             no-shared \
@@ -99,14 +104,26 @@ jobs:
           make install_sw
 
       # 3. 下载与校验 Tinc 源码
+      - name: Cache Tinc Source
+        id: cache-tinc
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/tinc.tar.gz
+            /tmp/tinc-src
+          key: tinc-${{ github.event.inputs.tinc_version }}-${{ env.TINC_SHA256 }}
+
       - name: Download & Verify Tinc Source
         run: |
           set -euo pipefail
-          mkdir -p /tmp/tinc-src
-          curl -f -sSL --retry 4 "https://codeload.github.com/gsliepen/tinc/tar.gz/refs/tags/release-${{ github.event.inputs.tinc_version }}" -o /tmp/tinc.tar.gz
-          echo "${{ env.TINC_SHA256 }}  /tmp/tinc.tar.gz" | sha256sum -c - || { echo "Tinc Hash Mismatch!"; exit 1; }
-          tar -xzf /tmp/tinc.tar.gz -C /tmp/tinc-src --strip-components=1
-          cd /tmp/tinc-src && autoreconf -i
+          if [ "${{ steps.cache-tinc.outputs.cache-hit }}" != "true" ]; then
+            rm -rf /tmp/tinc.tar.gz /tmp/tinc-src
+            mkdir -p /tmp/tinc-src
+            curl -f -sSL --retry 4 "https://codeload.github.com/gsliepen/tinc/tar.gz/refs/tags/release-${{ github.event.inputs.tinc_version }}" -o /tmp/tinc.tar.gz
+            echo "${{ env.TINC_SHA256 }}  /tmp/tinc.tar.gz" | sha256sum -c - || { echo "Tinc Hash Mismatch!"; exit 1; }
+            tar -xzf /tmp/tinc.tar.gz -C /tmp/tinc-src --strip-components=1
+            cd /tmp/tinc-src && autoreconf -i
+          fi
 
       # 4. 配置与交叉编译 Tinc
       - name: Build Static tincd
@@ -117,10 +134,16 @@ jobs:
           cd /tmp/tinc-src
           export CC="mipsel-linux-musl-gcc"
           export CXX="mipsel-linux-musl-g++"
-          
-          export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections"
+
+          export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables"
           export CPPFLAGS="-I/tmp/openssl_install/include"
-          export LDFLAGS="-static -Wl,--gc-sections -L/tmp/openssl_install/lib"
+          export LDFLAGS="-static -Wl,--gc-sections -Wl,-O1 -L/tmp/openssl_install/lib"
+          export LIBS="-ldl -lpthread -latomic"
+
+          if [ "${{ github.event.inputs.enable_lto }}" = "true" ]; then
+            export CFLAGS="$CFLAGS -flto"
+            export LDFLAGS="$LDFLAGS -flto"
+          fi
 
           ./configure \
             --host=mipsel-linux-musl \
@@ -132,7 +155,7 @@ jobs:
           make -C src -j$(nproc) || { echo "Make failed!"; exit 1; }
           make -C src install || { echo "Install failed!"; exit 1; }
 
-      # 5. ELF 静态审计、QEMU Mipsel 测试、Strip & UPX 压缩
+      # 5. ELF 静态审计、QEMU 测试、Strip & UPX 压缩
       - name: Audit, QEMU Test & Package
         run: |
           set -euo pipefail
@@ -140,8 +163,14 @@ jobs:
           [ -f "$TARGET_BIN" ] || { echo "Output binary missing!"; exit 1; }
 
           echo "=== 1. File Type & ELF Headers ==="
-          file "$TARGET_BIN"
-          mipsel-linux-musl-readelf -h "$TARGET_BIN"
+          FT=$(file "$TARGET_BIN")
+          echo "$FT"
+
+          echo "=== 1b. Arch/Endian Hard Check (must be LSB MIPS32r2) ==="
+          case "$FT" in
+            *"ELF 32-bit LSB"*"MIPS"*"MIPS32 rel2"*) echo "PASS: Little-Endian MIPS32r2";;
+            *) echo "FAIL: unexpected arch/endian: $FT"; exit 1;;
+          esac
 
           echo "=== 2. Static Dependency Check ==="
           if mipsel-linux-musl-readelf -d "$TARGET_BIN" 2>/dev/null | grep -q "NEEDED"; then
@@ -154,14 +183,18 @@ jobs:
           ls -lh "$TARGET_BIN"
 
           echo "=== 4. QEMU Mipsel Real Execution Test ==="
-          qemu-mipsel-static "$TARGET_BIN" --version
+          qemu-mipsel-static "$TARGET_BIN" --version || { echo "ERROR: QEMU run failed!"; exit 1; }
 
           if [ "${{ github.event.inputs.enable_upx }}" = "true" ]; then
             echo "=== 5. UPX Compression ==="
             if upx --best --lzma "$TARGET_BIN"; then
               upx -t "$TARGET_BIN"
-              echo "=== 6. Post-UPX QEMU Execution Test ==="
-              qemu-mipsel-static "$TARGET_BIN" --version
+              echo "=== 6. Post-UPX Static Check ==="
+              if mipsel-linux-musl-readelf -d "$TARGET_BIN" 2>/dev/null | grep -q "NEEDED"; then
+                echo "ERROR: post-UPX dynamic links!"; exit 1
+              fi
+              echo "=== 7. Post-UPX QEMU Execution Test ==="
+              qemu-mipsel-static "$TARGET_BIN" --version || { echo "ERROR: post-UPX QEMU failed!"; exit 1; }
               ls -lh "$TARGET_BIN"
             else
               echo "WARNING: UPX compression failed, using original stripped binary."
@@ -178,8 +211,8 @@ jobs:
             echo "tinc_version: ${{ github.event.inputs.tinc_version }}"
             echo "openssl_version: ${{ github.event.inputs.openssl_version }}"
             echo "toolchain: musl-cross-make prebuilt (mipsel / musl)"
-            echo "arch: MIPS32r2 Little-Endian (MT7621A)"
-            echo "static: yes (0 dynamic deps)"
+            echo "arch: MIPS32r2 Little-Endian (MT7621A), soft-float"
+            echo "static: yes (static-pie, 0 dynamic deps)"
             echo "upx: ${{ github.event.inputs.enable_upx }}"
             echo "sha256: $(awk '{print $1}' /tmp/$NAME.sha256)"
           } > "/tmp/$NAME.meta"
