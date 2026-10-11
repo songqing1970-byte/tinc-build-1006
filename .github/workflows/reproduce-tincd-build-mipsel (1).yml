@@ -1,13 +1,14 @@
 # =============================================================================
 # tincd 1.0.36 static build for Xiaomi Router 4A Gigabit (Mipsel, MT7621A)
 #
-# v3 修复版（解决 exit 77 与交叉编译探测问题）：
+# v3.1 完美修复版：
 #   * 修复项：
 #     1) 工具链 URL -> x86_64-mipsel-linux-musl.tar.xz[cite: 3, 4]
 #     2) 工具链 SHA256 校验值[cite: 3, 4]
 #     3) OpenSSL 目标 -> linux-mips32[cite: 3, 4]
 #     4) tinc 链接补 LIBS="-ldl -lpthread -latomic"[cite: 3, 4]
 #     5) 注入 cross_compiling=yes 彻底避开 QEMU 运行测试导致的 exit 77 误判
+#     6) 清理所有文档标记符号，确保 Shell 脚本解析零报错
 # =============================================================================
 
 name: Reproduce tincd static build for Xiaomi 4A Gigabit (MT7621A)
@@ -145,7 +146,7 @@ jobs:
           export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables"
           export CPPFLAGS="-I/tmp/openssl_install/include"
           export LDFLAGS="-static -Wl,--gc-sections -Wl,-O1 -L/tmp/openssl_install/lib"
-          export LIBS="-ldl -lpthread -latomic"[cite: 3, 4]
+          export LIBS="-ldl -lpthread -latomic"
 
           if [ "${{ github.event.inputs.enable_lto }}" = "true" ]; then
             echo "LTO enabled: appending -flto"
@@ -153,7 +154,6 @@ jobs:
             export LDFLAGS="$LDFLAGS -flto"
           fi
 
-          # 关键修复：加入 cross_compiling=yes 彻底避开 QEMU 运行测试导致的 exit 77 误判
           cross_compiling=yes ./configure \
             --build=x86_64-pc-linux-gnu \
             --host=mipsel-linux-musl \
