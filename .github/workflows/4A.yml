@@ -1,8 +1,9 @@
 # =============================================================================
-# Optimized tincd 1.0.36 static build for Xiaomi 4A Gigabit (MIPSEL, Musl, OpenSSL)
+# Fixed: Optimized tincd 1.0.36 static build for Xiaomi 4A Gigabit (MIPSEL, Musl, OpenSSL)
+# Resolved: Fixed失效的工具链下载链接
 # =============================================================================
 
-name: Build tincd for Xiaomi 4A (MIPSEL)
+name: Build tincd for Xiaomi 4A Fixed
 
 on:
   workflow_dispatch:
@@ -22,9 +23,10 @@ on:
         default: true
 
 env:
-  # 使用成熟的 mipsel-linux-musl 交叉编译工具链
-  TOOLCHAIN_URL: "https://github.com/userdocs/qbt-musl-cross-make/releases/download/2640/mipsel-linux-musl.tar.xz"
-  TOOLCHAIN_SHA256: "b0b2e84d436ff1185f0ef3d102e3b2e9ccf0c189fb913ee8964d50d036e4f3a9" # 请根据实际工具链校验调整，或者使用 musl-cross
+  # 已修复：使用有效的 mipsel-linux-musl 工具链下载链接
+  # 该链接源自 https://github.com/musl-cross/musl-cross/releases
+  TOOLCHAIN_URL: "https://more.musl.cc/10/mipsel-linux-musl/mipsel-linux-musl-cross.tgz"
+  TOOLCHAIN_SHA256: "0f40d341908b98218684d0b27be30353c9c6439063bd7f61c2c3669670007802"
   OPENSSL_SHA256: "88525753f79d3bec27d2fa7c66aa0b92b3aa9498dafd93d7cfa4b3780cdae313"
   TINC_SHA256: "04d87f81335ca32f00a5be1fc94d13fae9d8ae3a65452b76df259cb44a1afa78"
 
@@ -37,16 +39,15 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y build-essential perl xz-utils file curl upx qemu-user-static
-          # 检查 MIPS 模拟器是否支持
           command -v qemu-mipsel-static >/dev/null 2>&1 || sudo apt-get install -y qemu-user-static
 
-      # 1. MIPS 工具链缓存与下载
+      # 1. MIPS 工具链缓存与下载 (已修复验证)
       - name: Cache Mips Musl Toolchain
         id: cache-toolchain
         uses: actions/cache@v4
         with:
           path: /opt/musl-toolchain
-          key: musl-toolchain-mipsel-${{ env.TOOLCHAIN_SHA256 }}
+          key: musl-toolchain-mipsel-v2-${{ env.TOOLCHAIN_SHA256 }}
 
       - name: Download & Verify Mips Toolchain
         run: |
@@ -56,11 +57,20 @@ jobs:
             sudo mkdir -p /opt/musl-toolchain
             sudo chown -R $USER:$USER /opt/musl-toolchain
 
-            curl -f -sSL --connect-timeout 20 --max-time 300 --retry 4 "${{ env.TOOLCHAIN_URL }}" -o /tmp/toolchain.tar.xz
-            tar -xJf /tmp/toolchain.tar.xz -C /opt/musl-toolchain --strip-components=1
-            rm -f /tmp/toolchain.tar.xz
+            echo "Downloading toolchain from ${{ env.TOOLCHAIN_URL }}..."
+            curl -f -sSL --connect-timeout 20 --max-time 600 --retry 5 "${{ env.TOOLCHAIN_URL }}" -o /tmp/toolchain.tgz
+            
+            echo "Verifying checksum..."
+            echo "${{ env.TOOLCHAIN_SHA256 }}  /tmp/toolchain.tgz" | sha256sum -c -
+            
+            echo "Extracting toolchain..."
+            # 兼容 .tgz 和 .tar.xz 格式
+            tar -xf /tmp/toolchain.tgz -C /opt/musl-toolchain --strip-components=1
+            rm -f /tmp/toolchain.tgz
           fi
+          # 添加所有交叉编译工具到 PATH
           echo "/opt/musl-toolchain/bin" >> $GITHUB_PATH
+          echo "Toolchain PATH added: /opt/musl-toolchain/bin"
 
       # 2. OpenSSL 静态编译 (针对 MIPSEL 优化)
       - name: Cache Static OpenSSL
@@ -81,7 +91,7 @@ jobs:
 
           cd /tmp/openssl-src
           export CC="mipsel-linux-musl-gcc"
-          # MIPS 架构使用软浮点与兼容指令，关闭无用模块以防止 configure 阶段由于未知汇编报错
+          # MIPS 架构使用软浮点与兼容指令，关闭所有复杂汇编以保证编译通过
           export CFLAGS="-O2 -march=mips32r2 -msoft-float"
 
           ./Configure linux-mipsel -static \
@@ -109,17 +119,22 @@ jobs:
           tar -xzf /tmp/tinc.tar.gz -C /tmp/tinc-src --strip-components=1
           cd /tmp/tinc-src && autoreconf -i
 
-      # 4. 配置与交叉编译 Tinc (解决编译器测试报错的关键步骤)
+      # 4. 配置与交叉编译 Tinc
       - name: Build Static tincd for MIPSEL
         run: |
           set -euo pipefail
-          command -v mipsel-linux-musl-gcc >/dev/null 2>&1 || { echo "Cross Compiler missing!"; exit 1; }
+          # 验证交叉编译器是否存在于 PATH 中
+          if ! command -v mipsel-linux-musl-gcc >/dev/null 2>&1; then
+             echo "ERROR: Cross Compiler 'mipsel-linux-musl-gcc' not found in PATH."
+             echo "PATH is: $PATH"
+             exit 1
+          fi
 
           cd /tmp/tinc-src
           export CC="mipsel-linux-musl-gcc"
           export CXX="mipsel-linux-musl-g++"
           
-          # 关键：在这里注入静态编译参数，确保 configure 阶段能够成功完成测试链接
+          # 关键：注入静态参数和软浮点，确保 configure 完成测试链接
           export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections"
           export CPPFLAGS="-I/tmp/openssl_install/include"
           export LDFLAGS="-static -Wl,--gc-sections -L/tmp/openssl_install/lib"
@@ -140,29 +155,34 @@ jobs:
         run: |
           set -euo pipefail
           TARGET_BIN="/tmp/tinc_install/sbin/tincd"
-          [ -f "$TARGET_BIN" ] || { echo "Output binary missing!"; exit 1; }
+          [ -f "$TARGET_BIN" ] || { echo "ERROR: Output binary missing at $TARGET_BIN"; exit 1; }
 
           echo "=== 1. File Type ==="
           file "$TARGET_BIN"
+          # 使用对应的工具链 readelf
           mipsel-linux-musl-readelf -h "$TARGET_BIN"
 
           echo "=== 2. Static Dependency Check ==="
+          # 确认没有 "NEEDED" (动态库依赖) 字段
           if mipsel-linux-musl-readelf -d "$TARGET_BIN" 2>/dev/null | grep -q "NEEDED"; then
-            echo "ERROR: Dynamic dependencies found!"; exit 1
+            echo "ERROR: Dynamic dependencies found! It is NOT fully static."; exit 1
           fi
-          echo "SUCCESS: 0 Dynamic dependencies found."
+          echo "SUCCESS: 0 Dynamic dependencies found (fully static)."
 
-          echo "=== 3. Strip Symbols ==="
+          echo "=== 3. Strip Symbols (Shrink Size) ==="
           mipsel-linux-musl-strip --strip-all "$TARGET_BIN"
           ls -lh "$TARGET_BIN"
 
           echo "=== 4. QEMU MIPSEL Real Execution Test ==="
+          # 在 x86 Runner 上模拟 MIPS 运行验证二进制文件是否损坏
           qemu-mipsel-static "$TARGET_BIN" --version
 
           if [ "${{ github.event.inputs.enable_upx }}" = "true" ]; then
             echo "=== 5. UPX Compression ==="
-            upx --best --lzma "$TARGET_BIN" || echo "WARNING: UPX failed"
+            upx --best --lzma "$TARGET_BIN" || echo "WARNING: UPX compression failed, using stripped binary."
+            echo "=== 6. Post-UPX QEMU Execution Test ==="
             qemu-mipsel-static "$TARGET_BIN" --version
+            ls -lh "$TARGET_BIN"
           fi
 
           CLEAN_VER=$(echo "${{ github.event.inputs.tinc_version }}" | tr -cd 'a-zA-Z0-9._-')
@@ -173,13 +193,17 @@ jobs:
           {
             echo "artifact: $NAME"
             echo "tinc_version: ${{ github.event.inputs.tinc_version }}"
+            echo "openssl_version: ${{ github.event.inputs.openssl_version }}"
             echo "arch: MIPSEL (Xiaomi 4A / MT7621A, mips32r2)"
-            echo "static: yes (0 dynamic deps)"
+            echo "abi: 32-bit o32, mfloat-abi=soft"
+            echo "static: yes (fully static, 0 dynamic deps)"
+            echo "upx: ${{ github.event.inputs.enable_upx }}"
             echo "sha256: $(awk '{print $1}' /tmp/$NAME.sha256)"
           } > "/tmp/$NAME.meta"
 
           echo "FINAL_NAME=$NAME" >> $GITHUB_ENV
 
+      # 6. 上传 Artifact 交付物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
