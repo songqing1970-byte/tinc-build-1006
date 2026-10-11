@@ -1,22 +1,13 @@
 # =============================================================================
 # tincd 1.0.36 static build for Xiaomi Router 4A Gigabit (Mipsel, MT7621A)
 #
-# v2 优化版（相对上一版）：
-#   * 修复（均可跑通所必需，已本地实测）：
-#     1) 工具链 URL -> x86_64-mipsel-linux-musl.tar.xz（原 mipsel-linux-musl 404）
-#     2) 工具链 SHA256 -> 612ca4fb…（原 94aa5a9c… 校验失败）
-#     3) OpenSSL 目标 -> linux-mips32（linux-mipsel 不存在，会 configure 失败）
-#     4) tinc 链接补 LIBS="-ldl -lpthread -latomic"（MIPS32 需原子库，否则链接失败）
-#     5) tinc configure 显式 --build=x86_64-pc-linux-gnu（GitHub 装了 qemu-user-static
-#        后 binfmt 会让 MIPS 测试程序被 QEMU 执行，autoconf 误判原生编译，报
-#        "C compiler cannot create executables"；强制 --build 后跳过运行探测）
-#   * 新增优化（均已本地实测可编译、仍 0 动态依赖）：
-#     - 链接优化 -Wl,-O1
-#     - 去掉无用栈回溯表 -fno-asynchronous-unwind-tables（更小）
-#     - 审计步硬校验：产物必须是小端 LSB MIPS32r2，否则失败
-#     - tinc 构建目录加入缓存，二次触发更快
-#     - 可选 LTO（-flto，默认关闭；如需更小体积可开启，失败会退出并提示）
-# 产物：tincd-v1.0.36-mipsel-musl-static（static-pie，0 动态依赖，strip 后约 2.6MB）
+# v3 修复版（解决 exit 77 与交叉编译探测问题）：
+#   * 修复项：
+#     1) 工具链 URL -> x86_64-mipsel-linux-musl.tar.xz[cite: 3, 4]
+#     2) 工具链 SHA256 校验值[cite: 3, 4]
+#     3) OpenSSL 目标 -> linux-mips32[cite: 3, 4]
+#     4) tinc 链接补 LIBS="-ldl -lpthread -latomic"[cite: 3, 4]
+#     5) 注入 cross_compiling=yes 彻底避开 QEMU 运行测试导致的 exit 77 误判
 # =============================================================================
 
 name: Reproduce tincd static build for Xiaomi 4A Gigabit (MT7621A)
@@ -104,7 +95,6 @@ jobs:
           export CC="mipsel-linux-musl-gcc"
           export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections"
 
-          # 目标用 linux-mips32（linux-mipsel 在 OpenSSL 3.0.13 中不存在）
           ./Configure linux-mips32 -static \
             --prefix=/tmp/openssl_install \
             --openssldir=/tmp/openssl_install \
@@ -152,11 +142,10 @@ jobs:
           export CC="mipsel-linux-musl-gcc"
           export CXX="mipsel-linux-musl-g++"
 
-          # 基础优化（已实测）：-Wl,-O1 链接优化；去掉无用栈回溯表更小
           export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables"
           export CPPFLAGS="-I/tmp/openssl_install/include"
           export LDFLAGS="-static -Wl,--gc-sections -Wl,-O1 -L/tmp/openssl_install/lib"
-          export LIBS="-ldl -lpthread -latomic"   # MIPS32 必需，缺了会链接失败
+          export LIBS="-ldl -lpthread -latomic"[cite: 3, 4]
 
           if [ "${{ github.event.inputs.enable_lto }}" = "true" ]; then
             echo "LTO enabled: appending -flto"
@@ -164,10 +153,8 @@ jobs:
             export LDFLAGS="$LDFLAGS -flto"
           fi
 
-          # 关键：显式 --build 强制 autoconf 走交叉模式，否则 GitHub 上装了
-          # qemu-user-static 后 binfmt 会让 MIPS 测试程序被 QEMU 执行，autoconf
-          # 误判为原生编译，报 "C compiler cannot create executables"。
-          ./configure \
+          # 关键修复：加入 cross_compiling=yes 彻底避开 QEMU 运行测试导致的 exit 77 误判
+          cross_compiling=yes ./configure \
             --build=x86_64-pc-linux-gnu \
             --host=mipsel-linux-musl \
             --prefix=/tmp/tinc_install \
