@@ -1,0 +1,242 @@
+# =============================================================================
+# tincd 1.0.36 static build for Xiaomi Router 4A Gigabit (MT7621A, mipsel)
+#
+# 本版与上一版的区别：
+#   * 不再用预编译工具链（那个带 --disable-plugins，开不了 LTO）
+#   * 改为用 musl-cross-make 从源码构建工具链，显式 --enable-lto --enable-plugins
+#   * tinc 编译加 -flto，做链接时优化
+#   * 首次跑约 25-30 分钟（编工具链），之后走缓存约 2 分钟
+# 产物：tincd-v1.0.36-mipsel-musl-lto-static
+# =============================================================================
+
+name: tincd mipsel LTO build (MT7621A)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tinc_version:
+        description: 'Tinc Release Version'
+        required: true
+        default: '1.0.36'
+      openssl_version:
+        description: 'OpenSSL Version'
+        required: true
+        default: '3.0.13'
+      enable_upx:
+        description: 'Enable UPX Compression'
+        type: boolean
+        required: true
+        default: true
+
+env:
+  OPENSSL_SHA256: "88525753f79d3bec27d2fa7c66aa0b92b3aa9498dafd93d7cfa4b3780cdae313"
+  TINC_SHA256: "04d87f81335ca32f00a5be1fc94d13fae9d8ae3a65452b76df259cb44a1afa78"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential perl xz-utils file curl upx \
+            qemu-user-static git gawk bison flex texinfo g++ libgmp-dev libmpfr-dev \
+            libmpc-dev libisl-dev zlib1g-dev
+          command -v qemu-mipsel-static >/dev/null 2>&1 || { echo "qemu missing"; exit 1; }
+
+      # 1. 从源码构建 musl-cross-make（带 LTO 支持），缓存
+      - name: Cache LTO musl toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: /opt/musl-toolchain
+          key: musl-lto-toolchain-mipsel-v1
+
+      - name: Build musl-cross-make toolchain (with LTO)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo rm -rf /opt/musl-toolchain
+          mkdir -p /tmp/musl-cross-make
+          git clone --depth 1 https://github.com/richfelker/musl-cross-make.git /tmp/musl-cross-make
+
+          cd /tmp/musl-cross-make
+          printf '%s\n' \
+            'TARGET = mipsel-linux-musl' \
+            'GCC_VER = 13.2.0' \
+            'BINUTILS_VER = 2.41' \
+            'MUSL_VER = 1.2.5' \
+            'GCC_CONFIG += --enable-languages=c,c++ --enable-lto --enable-plugins' \
+            'COMMON_CONFIG += --disable-nls' \
+            > config.mak
+          cat config.mak
+
+          make -j$(nproc) 2>&1 | tail -n 30
+
+          sudo mkdir -p /opt/musl-toolchain
+          sudo cp -r ./output/* /opt/musl-toolchain/
+          sudo chown -R $USER:$USER /opt/musl-toolchain
+
+          # 验证 LTO 是否真的可用
+          echo 'int main(){return 0;}' > /tmp/lto_test.c
+          /opt/musl-toolchain/bin/mipsel-linux-musl-gcc -flto /tmp/lto_test.c -o /tmp/lto_test || {
+            echo "ERROR: LTO still not working in this toolchain!"
+            exit 1
+          }
+          echo "LTO toolchain verified OK."
+
+      # 2. OpenSSL 静态编译缓存
+      - name: Cache Static OpenSSL
+        id: cache-openssl
+        uses: actions/cache@v4
+        with:
+          path: /tmp/openssl_install
+          key: openssl-static-mipsel-${{ github.event.inputs.openssl_version }}-${{ env.OPENSSL_SHA256 }}
+
+      - name: Build Static OpenSSL (Mipsel)
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          export PATH="/opt/musl-toolchain/bin:$PATH"
+          mkdir -p /tmp/openssl-src
+          curl -f -sSL --retry 4 "https://www.openssl.org/source/openssl-${{ github.event.inputs.openssl_version }}.tar.gz" -o /tmp/openssl.tar.gz
+          echo "${{ env.OPENSSL_SHA256 }}  /tmp/openssl.tar.gz" | sha256sum -c - || { echo "OpenSSL Hash Mismatch!"; exit 1; }
+          tar -xzf /tmp/openssl.tar.gz -C /tmp/openssl-src --strip-components=1
+
+          cd /tmp/openssl-src
+          export CC="mipsel-linux-musl-gcc"
+          export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections"
+
+          ./Configure linux-mips32 -static \
+            --prefix=/tmp/openssl_install \
+            --openssldir=/tmp/openssl_install \
+            no-shared no-engine no-async no-tests no-legacy no-ssl3 no-weak-ssl-ciphers \
+            -march=mips32r2 -msoft-float
+
+          make -j$(nproc)
+          make install_sw
+
+      # 3. Tinc 源码缓存
+      - name: Cache Tinc Source
+        id: cache-tinc
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/tinc.tar.gz
+            /tmp/tinc-src
+          key: tinc-${{ github.event.inputs.tinc_version }}-${{ env.TINC_SHA256 }}
+
+      - name: Download & Verify Tinc Source
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.cache-tinc.outputs.cache-hit }}" != "true" ]; then
+            rm -rf /tmp/tinc.tar.gz /tmp/tinc-src
+            mkdir -p /tmp/tinc-src
+            curl -f -sSL --retry 4 "https://codeload.github.com/gsliepen/tinc/tar.gz/refs/tags/release-${{ github.event.inputs.tinc_version }}" -o /tmp/tinc.tar.gz
+            echo "${{ env.TINC_SHA256 }}  /tmp/tinc.tar.gz" | sha256sum -c - || { echo "Tinc Hash Mismatch!"; exit 1; }
+            tar -xzf /tmp/tinc.tar.gz -C /tmp/tinc-src --strip-components=1
+            cd /tmp/tinc-src && autoreconf -i
+          fi
+
+      # 4. 编译 tinc（开 LTO）
+      - name: Build Static tincd (LTO)
+        run: |
+          set -euo pipefail
+          export PATH="/opt/musl-toolchain/bin:$PATH"
+          command -v mipsel-linux-musl-gcc >/dev/null 2>&1 || { echo "gcc missing!"; exit 1; }
+
+          cd /tmp/tinc-src
+          rm -f config.cache config.status Makefile
+          export CC="mipsel-linux-musl-gcc"
+          export CXX="mipsel-linux-musl-g++"
+
+          # LTO 开启：CFLAGS 和 LDFLAGS 都加 -flto
+          export CFLAGS="-O2 -march=mips32r2 -msoft-float -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -flto"
+          export CPPFLAGS="-I/tmp/openssl_install/include"
+          export LDFLAGS="-static -Wl,--gc-sections -Wl,-O1 -L/tmp/openssl_install/lib -flto"
+          export LIBS="-ldl -lpthread -latomic"
+
+          ./configure \
+            --build=x86_64-pc-linux-gnu \
+            --host=mipsel-linux-musl \
+            --prefix=/tmp/tinc_install \
+            --disable-lzo \
+            --disable-zlib \
+            --with-openssl=/tmp/openssl_install || {
+              echo "=== Configure failed. Key lines from config.log: ==="
+              grep -iE "error|cannot|LTO|cross compiling|conftest" /tmp/tinc-src/config.log | tail -n 30
+              exit 1
+            }
+
+          make -C src -j$(nproc) || { echo "Make failed!"; exit 1; }
+          make -C src install || { echo "Install failed!"; exit 1; }
+
+      # 5. 审计 + QEMU 测试 + UPX
+      - name: Audit, QEMU Test & Package
+        run: |
+          set -euo pipefail
+          export PATH="/opt/musl-toolchain/bin:$PATH"
+          TARGET_BIN="/tmp/tinc_install/sbin/tincd"
+          [ -f "$TARGET_BIN" ] || { echo "Output binary missing!"; exit 1; }
+
+          echo "=== 1. File Type ==="
+          FT=$(file "$TARGET_BIN")
+          echo "$FT"
+          case "$FT" in
+            *"ELF 32-bit LSB"*"MIPS"*"MIPS32 rel2"*) echo "PASS: Little-Endian MIPS32r2";;
+            *) echo "FAIL: unexpected arch"; exit 1;;
+          esac
+
+          echo "=== 2. Static Dependency Check ==="
+          if mipsel-linux-musl-readelf -d "$TARGET_BIN" 2>/dev/null | grep -q "NEEDED"; then
+            echo "ERROR: Dynamic dependencies found!"; exit 1
+          fi
+          echo "SUCCESS: 0 Dynamic dependencies."
+
+          echo "=== 3. Strip ==="
+          mipsel-linux-musl-strip --strip-all "$TARGET_BIN"
+          ls -lh "$TARGET_BIN"
+
+          echo "=== 4. QEMU Test ==="
+          qemu-mipsel-static "$TARGET_BIN" --version || { echo "QEMU test failed!"; exit 1; }
+
+          if [ "${{ github.event.inputs.enable_upx }}" = "true" ]; then
+            echo "=== 5. UPX Compression ==="
+            if upx --best --lzma "$TARGET_BIN"; then
+              upx -t "$TARGET_BIN"
+              qemu-mipsel-static "$TARGET_BIN" --version || { echo "post-UPX QEMU failed!"; exit 1; }
+              ls -lh "$TARGET_BIN"
+            else
+              echo "WARNING: UPX failed, using stripped binary."
+            fi
+          fi
+
+          CLEAN_VER=$(echo "${{ github.event.inputs.tinc_version }}" | tr -cd 'a-zA-Z0-9._-')
+          NAME="tincd-v${CLEAN_VER}-mipsel-musl-lto-static"
+          cp "$TARGET_BIN" "/tmp/$NAME"
+          (cd /tmp && sha256sum "$NAME" > "$NAME.sha256")
+
+          {
+            echo "artifact: $NAME"
+            echo "tinc_version: ${{ github.event.inputs.tinc_version }}"
+            echo "openssl_version: ${{ github.event.inputs.openssl_version }}"
+            echo "toolchain: musl-cross-make built from source (mipsel, gcc 13.2.0, LTO enabled)"
+            echo "arch: MIPS32r2 Little-Endian (MT7621A), soft-float"
+            echo "optimization: -O2 -flto -Wl,--gc-sections -Wl,-O1"
+            echo "static: yes (0 dynamic deps)"
+            echo "qemu_test: passed"
+            echo "upx: ${{ github.event.inputs.enable_upx }}"
+            echo "sha256: $(awk '{print $1}' /tmp/$NAME.sha256)"
+          } > "/tmp/$NAME.meta"
+
+          echo "FINAL_NAME=$NAME" >> $GITHUB_ENV
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FINAL_NAME }}
+          path: |
+            /tmp/${{ env.FINAL_NAME }}
+            /tmp/${{ env.FINAL_NAME }}.sha256
+            /tmp/${{ env.FINAL_NAME }}.meta
